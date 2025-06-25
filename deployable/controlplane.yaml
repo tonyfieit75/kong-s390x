@@ -1,0 +1,14 @@
+apiVersion: gateway-operator.konghq.com/v1beta1
+kind: ControlPlane
+metadata:
+  name: kong-controlplane
+  namespace: kong-system
+spec:
+  gatewayClass: kong
+  deployment:
+    podTemplateSpec:
+      spec:
+        containers:
+          - name: controller
+            image: quay.io/tonyfieit75/kong-oss:3.6.1-s390x-1
+

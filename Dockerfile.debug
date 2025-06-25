@@ -1,0 +1,108 @@
+# === STAGE 1: Builder ===
+FROM registry.access.redhat.com/ubi8/ubi AS builder
+
+ARG OPENRESTY_VERSION=1.25.3.1
+ARG KONG_VERSION=3.6.1
+
+RUN dnf install -y \
+    make gcc git unzip tar curl which wget hostname \
+    readline-devel ncurses-devel libyaml-devel libffi-devel openssl-devel \
+    perl lua sudo findutils pcre-devel && \
+    dnf clean all
+
+WORKDIR /tmp
+
+# Clone Kong OpenResty patches (local modules)
+RUN git clone https://github.com/Kong/openresty-patches.git
+
+# Download and build OpenResty (no patches applied due to private repo)
+RUN curl -LO https://github.com/Kong/openresty-release-mirror/releases/download/${OPENRESTY_VERSION}/openresty-${OPENRESTY_VERSION}.tar.gz && \
+    tar -zxvf openresty-${OPENRESTY_VERSION}.tar.gz && \
+    cd openresty-${OPENRESTY_VERSION} && \
+    ./configure --prefix=/usr/local/openresty \
+        --with-luajit \
+        --with-http_ssl_module \
+        --with-http_realip_module && \
+    make -j$(nproc) && make install
+
+# Install LuaRocks
+ENV LUAROCKS_VERSION=3.11.0
+RUN wget https://luarocks.github.io/luarocks/releases/luarocks-${LUAROCKS_VERSION}.tar.gz && \
+    tar zxpf luarocks-${LUAROCKS_VERSION}.tar.gz && \
+    cd luarocks-${LUAROCKS_VERSION} && \
+    ./configure \
+      --with-lua=/usr/local/openresty/luajit \
+      --with-lua-include=/usr/local/openresty/luajit/include/luajit-2.1 && \
+    make && make install
+
+# Set up Lua environment
+ENV LUA_DIR=/usr/local/openresty/luajit
+ENV LUA_PATH="/root/.luarocks/share/lua/5.1/?.lua;/root/.luarocks/share/lua/5.1/?/init.lua;;"
+ENV LUA_CPATH="/root/.luarocks/lib/lua/5.1/?.so;;"
+
+# Install Lua modules required by Kong
+RUN luarocks install --tree=/root/.luarocks lua-cjson 2.1.0.10 --lua-dir=$LUA_DIR && \
+    luarocks install --tree=/root/.luarocks luafilesystem --lua-dir=$LUA_DIR && \
+    luarocks install --tree=/root/.luarocks luasocket --lua-dir=$LUA_DIR && \
+    luarocks install --tree=/root/.luarocks lua-resty-http --lua-dir=$LUA_DIR && \
+    luarocks install --tree=/root/.luarocks lua-resty-openssl --lua-dir=$LUA_DIR && \
+    luarocks install --tree=/root/.luarocks penlight --lua-dir=$LUA_DIR && \
+    luarocks install --tree=/root/.luarocks lua-protobuf \
+        LUA_INCDIR=$LUA_DIR/include/luajit-2.1 LUA_LIBDIR=$LUA_DIR/lib && \
+    luarocks install --tree=/root/.luarocks lua-resty-ljsonschema --lua-dir=$LUA_DIR && \
+    luarocks install --tree=/root/.luarocks version --lua-dir=$LUA_DIR
+
+# Fetch Kong source (no make build)
+WORKDIR /build
+RUN git clone https://github.com/Kong/kong.git --branch ${KONG_VERSION} --depth 1
+
+RUN git clone https://github.com/Kong/lua-resty-timer-ng.git && \
+    cd lua-resty-timer-ng && \
+    luarocks make --tree=/root/.luarocks --lua-dir=$LUA_DIR && \
+    cd .. && rm -rf lua-resty-timer-ng
+
+# === STAGE 2: Runtime ===
+FROM registry.access.redhat.com/ubi8/ubi-minimal
+
+LABEL maintainer="your-name@your-org.com"
+
+# Install runtime dependencies
+RUN microdnf install -y openssl libyaml hostname perl shadow-utils && microdnf clean all
+
+# Create kong user and folders
+RUN useradd --system kong && \
+    mkdir -p \
+      /usr/local/kong/logs \
+      /usr/local/kong/pids \
+      /usr/local/kong/tmp \
+      /usr/local/kong/.cache \
+      /usr/local/kong/conf && \
+    touch \
+      /usr/local/kong/logs/error.log \
+      /usr/local/kong/logs/access.log \
+      /usr/local/kong/logs/admin_error.log \
+      /usr/local/kong/logs/admin_access.log \
+      /usr/local/kong/.ca_combined && \
+    chmod -R 777 /usr/local/kong
+
+# Copy OpenResty
+COPY --from=builder /usr/local/openresty /usr/local/openresty
+
+# Copy Lua modules
+COPY --from=builder /root/.luarocks/share/lua/5.1/ /usr/local/share/lua/5.1/
+COPY --from=builder /root/.luarocks/lib/lua/5.1/ /usr/local/lib/lua/5.1/
+
+# Copy Kong source
+COPY --from=builder /build/kong /usr/local/kong
+
+# Set environment
+ENV PATH="/usr/local/openresty/bin:/usr/local/kong/bin:$PATH"
+ENV LUA_PATH="/usr/local/share/lua/5.1/?.lua;/usr/local/share/lua/5.1/?/init.lua;;"
+ENV LUA_CPATH="/usr/local/lib/lua/5.1/?.so;;"
+ENV KONG_PREFIX=/usr/local/kong
+ENV KONG_CONF=/usr/local/kong/kong.conf
+
+WORKDIR /usr/local/kong
+
+CMD ["bin/kong", "start"]
+

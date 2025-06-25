@@ -1,0 +1,13 @@
+apiVersion: gateway-operator.konghq.com/v1beta1
+kind: DataPlane
+metadata:
+  name: kong-dataplane
+  namespace: kong-system
+spec:
+  deployment:
+    podTemplateSpec:
+      spec:
+        containers:
+          - name: proxy
+            image: quay.io/tonyfieit75/kong-oss:3.6.1-s390x-debug
+

@@ -1,0 +1,59 @@
+# syntax=docker/dockerfile:1
+
+FROM registry.access.redhat.com/ubi8/ubi as builder
+
+# Install dependencies
+RUN dnf install -y \
+    make gcc git unzip tar curl which \
+    readline-devel ncurses-devel libyaml-devel libffi-devel openssl-devel \
+    perl lua luarocks hostname sudo findutils && \
+    dnf clean all
+
+# Set up Kong source
+WORKDIR /build/kong
+COPY . .
+
+# Install Lua dependencies
+ENV LUA_DIR=/usr/local/openresty/luajit
+ENV LUA_PATH="/root/.luarocks/share/lua/5.1/?.lua;/root/.luarocks/share/lua/5.1/?/init.lua;;"
+ENV LUA_CPATH="/root/.luarocks/lib/lua/5.1/?.so;;"
+
+RUN luarocks install --tree=/root/.luarocks lua-cjson && \
+    luarocks install --tree=/root/.luarocks luafilesystem && \
+    luarocks install --tree=/root/.luarocks lua-resty-http && \
+    luarocks install --tree=/root/.luarocks lua-resty-openssl && \
+    luarocks install --tree=/root/.luarocks penlight && \
+    luarocks install --tree=/root/.luarocks lua-protobuf && \
+    luarocks install --tree=/root/.luarocks lua-system-constants && \
+    luarocks install --tree=/root/.luarocks version && \
+    luarocks install --tree=/root/.luarocks lua-resty-jit-uuid \
+    --lua-dir=$LUA_DIR && \
+    luarocks install --tree=/root/.luarocks lua-resty-timer-ng \
+    --lua-dir=$LUA_DIR && \
+    luarocks install --tree=/root/.luarocks lua-resty-ipmatcher \
+    --lua-dir=$LUA_DIR
+
+# Final runtime image
+FROM registry.access.redhat.com/ubi8/ubi-minimal
+
+LABEL maintainer="your-name@your-org.com"
+
+RUN microdnf install -y openssl libyaml hostname && microdnf clean all
+
+# Create kong user and directories
+RUN useradd --system kong && mkdir -p /usr/local/kong && chown kong:kong /usr/local/kong
+
+COPY --from=builder /build/kong /usr/local/kong
+COPY --from=builder /root/.luarocks /root/.luarocks
+
+ENV PATH="/usr/local/openresty/bin:/usr/local/kong/bin:$PATH"
+ENV LUA_PATH="/root/.luarocks/share/lua/5.1/?.lua;/root/.luarocks/share/lua/5.1/?/init.lua;;"
+ENV LUA_CPATH="/root/.luarocks/lib/lua/5.1/?.so;;"
+ENV KONG_PREFIX=/usr/local/kong
+ENV KONG_CONF=/usr/local/kong/kong.conf
+
+USER kong
+WORKDIR /usr/local/kong
+
+CMD ["kong", "start"]
+
